@@ -1087,6 +1087,12 @@ func (l *RemoteProvider) SaveK8sContext(token string, k8sContext K8sContext, add
 		}
 	}
 
+	// Legacy ID reconciliation for in-cluster contexts:
+	// Older Meshery versions generated IDs that included the service-account token.
+	// Current code generates token-independent IDs. For remote providers, the remote
+	// service handles reconciliation, so we just use the current ID generation.
+	// Note: This is a no-op for remote providers since they don't have direct DB access.
+
 	// An unreachable context has no server ID assigned; persist it anyway as a
 	// discovered connection rather than dereferencing a nil pointer.
 	var k8sServerID uuid.UUID
@@ -1148,6 +1154,54 @@ func (l *RemoteProvider) SaveK8sContext(token string, k8sContext K8sContext, add
 		err := ErrPersistConnection(fmt.Errorf("remote provider returned a nil connection for kubernetes context %q", conn.Name))
 		l.Log.Error(err)
 		return connections.Connection{}, err
+	}
+
+	// Credential refresh: if this is an existing connection (same ID was found),
+	// update its credential with the newly discovered auth/cluster data.
+	// This handles token rotation for in-cluster contexts where the ID remains stable.
+	if connection.CredentialID != nil && conn.CredentialSecret != nil {
+		// Update the existing credential with the new auth/cluster data
+		// First, fetch the existing credential to preserve its required fields
+		existingCred, _, credErr := l.GetCredentialByID(token, *connection.CredentialID)
+		if credErr != nil {
+			// Return error if we can't fetch the existing credential
+			return connections.Connection{}, fmt.Errorf("failed to fetch credential for refresh: %w", credErr)
+		}
+		// Preserve the existing credential's properties and update only the secret
+		updatedCredential := &Credential{
+			ID:     *connection.CredentialID,
+			Secret: conn.CredentialSecret,
+			UserId: existingCred.UserId, // Preserve the UserId for the update constraint
+			Name:   existingCred.Name,   // Preserve other fields
+			Type:   existingCred.Type,
+		}
+		// Use DoRequest directly with the token to update the credential via the remote provider
+		// This avoids the nil-request panic that would occur in UpdateUserCredential -> GetToken -> req.Cookie()
+		if !l.Capabilities.IsSupported(PersistCredentials) {
+			l.Log.Error(ErrOperationNotAvailable)
+			return connections.Connection{}, ErrInvalidCapability("PersistCredentials", l.ProviderName)
+		}
+		ep, _ := l.Capabilities.GetEndpointForFeature(PersistCredentials)
+		_creds, err := json.Marshal(updatedCredential)
+		if err != nil {
+			return connections.Connection{}, fmt.Errorf("failed to marshal credential for refresh: %w", err)
+		}
+		bf := bytes.NewBuffer(_creds)
+		remoteProviderURL, _ := url.Parse(l.RemoteProviderURL + ep)
+		cReq, _ := http.NewRequest(http.MethodPut, remoteProviderURL.String(), bf)
+		resp, err := l.DoRequest(cReq, token)
+		if err != nil {
+			return connections.Connection{}, fmt.Errorf("failed to update credential for refresh: %w", err)
+		}
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				l.Log.Error(err)
+			}
+		}()
+		if resp.StatusCode != http.StatusOK {
+			bdr, _ := io.ReadAll(resp.Body)
+			return connections.Connection{}, fmt.Errorf("failed to update credential for refresh: status %d, body: %s", resp.StatusCode, string(bdr))
+		}
 	}
 
 	l.Log.Infof("persisted kubernetes context %q to remote provider as connection %s", connection.Name, connection.ID)
