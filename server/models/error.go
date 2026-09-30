@@ -148,8 +148,8 @@ const (
 	ErrSeedingConnectionsCode             = "meshery-server-1462"
 	ErrSeedingConnectionKindCode          = "meshery-server-1463"
 	ErrKeysRegisterColumnMissingCode      = "meshery-server-1486"
-	ErrReadInClusterTokenCode             = "meshery-server-1488"
-	ErrReadInClusterCACode                = "meshery-server-1489"
+	ErrReadInClusterTokenCode             = "meshery-server-1487"
+	ErrReadInClusterCACode                = "meshery-server-1488"
 	ErrNoSystemEventSinkCode              = "meshery-server-1482"
 	ErrSeedingStagePanicCode              = "meshery-server-1483"
 	ErrImportFailureCode                  = "meshery-server-1359"
@@ -561,7 +561,8 @@ func ErrReadInClusterCA(err error) error {
 // ErrKeysRegisterColumnMissing reports that the keys file's header row no
 // longer carries the column that selects which keys register with the Local
 // Provider, so SeedKeys can select no row at all. The short description stays
-// alert because nothing is seeded until the file is fixed.
+// literal: errorutil can only lift static strings into docs/data/errorref, so
+// the absent column name carries in the details.
 func ErrKeysRegisterColumnMissing(column string) error {
 	return errors.New(
 		ErrKeysRegisterColumnMissingCode,
