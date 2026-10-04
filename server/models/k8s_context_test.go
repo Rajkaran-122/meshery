@@ -23,6 +23,7 @@ import (
 	"github.com/gofrs/uuid"
 	"github.com/meshery/meshery/server/internal/sql"
 	"github.com/meshery/meshery/server/models/connections"
+	"github.com/meshery/meshery/server/models/httputil"
 	"github.com/meshery/meshkit/database"
 	mkerrors "github.com/meshery/meshkit/errors"
 	"github.com/meshery/meshkit/logger"
@@ -467,13 +468,13 @@ func TestNewK8sContextFromInClusterConfig(t *testing.T) {
 			// AssignVersion endpoint
 			w.Header().Set("Content-Type", "application/json")
 			if _, err := fmt.Fprintf(w, `{"major":"1","minor":"28","gitVersion":"v1.28.0"}`); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				httputil.WriteJSONError(w, err.Error(), http.StatusInternalServerError)
 			}
 		case "/api/v1/namespaces/kube-system":
 			// KubernetesServerID lookup endpoint
 			w.Header().Set("Content-Type", "application/json")
 			if _, err := fmt.Fprintf(w, `{"metadata":{"uid":"test-server-uid-12345"}}`); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				httputil.WriteJSONError(w, err.Error(), http.StatusInternalServerError)
 			}
 		default:
 			w.WriteHeader(http.StatusNotFound)
