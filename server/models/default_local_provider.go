@@ -513,6 +513,10 @@ func (l *DefaultLocalProvider) SaveK8sContext(_ string, k8sContext K8sContext, a
 	id, err := K8sContextGenerateID(k8sContext)
 	if err == nil {
 		connID = uuid.FromStringOrNil(id)
+		// Set the generated ID on k8sContext so it's available for the update path
+		// SaveMesheryK8sContext generates the ID on its local copy, but we need it
+		// on the caller's k8sContext when ErrContextAlreadyPersisted is returned
+		k8sContext.ID = id
 	}
 
 	// Legacy ID reconciliation for in-cluster contexts:

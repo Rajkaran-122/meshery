@@ -558,22 +558,6 @@ func ErrReadInClusterCA(err error) error {
 	return errors.New(ErrReadInClusterCACode, errors.Alert, []string{"Error reading in-cluster CA certificate"}, []string{err.Error()}, []string{"Meshery may not be running in a Kubernetes cluster", "CA certificate file may be missing or inaccessible"}, []string{"Ensure Meshery is running in-cluster with proper service account permissions", "Verify the CA certificate file exists at the expected path"})
 }
 
-// ErrKeysRegisterColumnMissing reports that the keys file's header row no
-// longer carries the column that selects which keys register with the Local
-// Provider, so SeedKeys can select no row at all. The short description stays
-// literal: errorutil can only lift static strings into docs/data/errorref, so
-// the absent column name carries in the details.
-func ErrKeysRegisterColumnMissing(column string) error {
-	return errors.New(
-		ErrKeysRegisterColumnMissingCode,
-		errors.Alert,
-		[]string{"Meshery Server could not determine which keys to register with the Local Provider"},
-		[]string{fmt.Sprintf("register column %q is missing from the keys file header", column)},
-		[]string{"The header row of the keys file was renamed or dropped, so no row could be selected for registration and nothing is seeded from this file; on a fresh or reset database the Key table stays empty, while previously seeded keys are left untouched"},
-		[]string{"Restore the missing header in server/permissions/keys.csv (or the file KEYS_PATH points at) and restart Meshery Server so keys seed again"},
-	)
-}
-
 func ErrGettingSeededComponents(err error, content string) error {
 	return errors.New(ErrGettingSeededComponentsCode, errors.Alert, []string{"Error while getting ", content, " from sample content"}, []string{err.Error()}, []string{"Sample content does not exist.\nContent file format not supported.\nUser doesn't have permission to read sample content.\nContent file corrupt."}, []string{"Try restarting Meshery.\nTry fetching content again."})
 }
@@ -909,4 +893,20 @@ func ErrOperatorChartSubstituted(reason string) error {
 // (deploy, undeploy, chart-version reconcile) have nothing to act through.
 func ErrOperatorHandlerNotAttached(contextID string) error {
 	return errors.New(ErrOperatorHandlerNotAttachedCode, errors.Alert, []string{"No Meshery Operator controller handler is attached"}, []string{"Controller handlers are attached when a Kubernetes connection connects; for context " + contextID + " attaching them failed or has not happened yet."}, []string{"The connection's kubeconfig could not be generated, or the Kubernetes client could not be created."}, []string{"Reconnect the Kubernetes connection and retry; the configuration is re-applied on connect."})
+}
+
+// ErrKeysRegisterColumnMissing reports that the keys file's header row no
+// longer carries the column that selects which keys register with the Local
+// Provider, so SeedKeys can select no row at all. The short description stays
+// literal: errorutil can only lift static strings into docs/data/errorref, so
+// the absent column name carries in the details.
+func ErrKeysRegisterColumnMissing(column string) error {
+	return errors.New(
+		ErrKeysRegisterColumnMissingCode,
+		errors.Alert,
+		[]string{"Meshery Server could not determine which keys to register with the Local Provider"},
+		[]string{fmt.Sprintf("register column %q is missing from the keys file header", column)},
+		[]string{"The header row of the keys file was renamed or dropped, so no row could be selected for registration and nothing is seeded from this file; on a fresh or reset database the Key table stays empty, while previously seeded keys are left untouched"},
+		[]string{"Restore the missing header in server/permissions/keys.csv (or the file KEYS_PATH points at) and restart Meshery Server so keys seed again"},
+	)
 }

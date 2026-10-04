@@ -2,7 +2,20 @@ package models
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"testing"
 	"time"
@@ -367,14 +380,170 @@ func TestK8sContextGenerateID(t *testing.T) {
 }
 
 // TestNewK8sContextFromInClusterConfigTokenRotation verifies that in-cluster contexts
+// generateTestCACert generates a self-signed CA certificate for testing.
+// Returns the certificate, private key, and any error.
+func generateTestCACert(t *testing.T) (*x509.Certificate, *rsa.PrivateKey, error) {
+	t.Helper()
+
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate RSA key: %w", err)
+	}
+
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate serial number: %w", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization: []string{"Test CA"},
+			CommonName:   "localhost",
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privKey.PublicKey, privKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create certificate: %w", err)
+	}
+
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse certificate: %w", err)
+	}
+
+	return cert, privKey, nil
+}
+
+// TestNewK8sContextFromInClusterConfig tests the full in-cluster constructor path
+// using a fake Kubernetes API server. It verifies that DeploymentType is set to
+// "in_cluster" and that the constructor properly reads token/CA from the expected
+// in-cluster file locations.
+func TestNewK8sContextFromInClusterConfig(t *testing.T) {
+	t.Helper()
+
+	// Generate a test CA certificate programmatically
+	caCert, caPrivKey, err := generateTestCACert(t)
+	if err != nil {
+		t.Fatalf("failed to generate CA cert: %v", err)
+	}
+
+	// Create a temporary directory for in-cluster files
+	tmpDir := t.TempDir()
+	tokenFile := filepath.Join(tmpDir, "token")
+	caFile := filepath.Join(tmpDir, "ca.crt")
+
+	// Write a test service-account token
+	testToken := "test-service-account-token"
+	if err := os.WriteFile(tokenFile, []byte(testToken), 0600); err != nil {
+		t.Fatalf("failed to write token file: %v", err)
+	}
+
+	// Write the CA certificate in PEM format
+	caPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: caCert.Raw,
+	})
+	if err := os.WriteFile(caFile, caPEM, 0600); err != nil {
+		t.Fatalf("failed to write CA file: %v", err)
+	}
+
+	// Start a fake Kubernetes API server
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/livez":
+			// PingTest endpoint
+			w.WriteHeader(http.StatusOK)
+		case "/version":
+			// AssignVersion endpoint
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"major":"1","minor":"28","gitVersion":"v1.28.0"}`)
+		case "/api/v1/namespaces/kube-system":
+			// KubernetesServerID lookup endpoint
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"metadata":{"uid":"test-server-uid-12345"}}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	server.TLS = &tls.Config{
+		Certificates: []tls.Certificate{{Certificate: [][]byte{caCert.Raw}, PrivateKey: caPrivKey}},
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	// Save and restore original in-cluster file paths
+	oldTokenFile := inClusterTokenFile
+	oldCAFile := inClusterRootCAFile
+	defer func() {
+		inClusterTokenFile = oldTokenFile
+		inClusterRootCAFile = oldCAFile
+	}()
+
+	// Override in-cluster file paths to our test files
+	inClusterTokenFile = tokenFile
+	inClusterRootCAFile = caFile
+
+	// Set in-cluster environment variables
+	oldHost := os.Getenv("KUBERNETES_SERVICE_HOST")
+	oldPort := os.Getenv("KUBERNETES_SERVICE_PORT")
+	defer func() {
+		if oldHost != "" {
+			os.Setenv("KUBERNETES_SERVICE_HOST", oldHost)
+		} else {
+			os.Unsetenv("KUBERNETES_SERVICE_HOST")
+		}
+		if oldPort != "" {
+			os.Setenv("KUBERNETES_SERVICE_PORT", oldPort)
+		} else {
+			os.Unsetenv("KUBERNETES_SERVICE_PORT")
+		}
+	}()
+
+	// Parse server URL to get host and port
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse server URL: %v", err)
+	}
+	os.Setenv("KUBERNETES_SERVICE_HOST", u.Hostname())
+	os.Setenv("KUBERNETES_SERVICE_PORT", u.Port())
+
+	// Call the actual constructor
+	log, _ := logger.New("test", logger.Options{})
+	instanceID := core.Uuid(uuid.Must(uuid.NewV4()))
+	ctx, err := NewK8sContextFromInClusterConfig("in-cluster", &instanceID, log)
+	if err != nil {
+		t.Fatalf("NewK8sContextFromInClusterConfig() error = %v", err)
+	}
+
+	// Verify DeploymentType is set to "in_cluster"
+	if ctx.DeploymentType != "in_cluster" {
+		t.Errorf("DeploymentType = %q, want \"in_cluster\"", ctx.DeploymentType)
+	}
+
+	// Verify the context name matches the in-cluster convention
+	if ctx.Name != "in-cluster" {
+		t.Errorf("Name = %q, want \"in-cluster\"", ctx.Name)
+	}
+
+	// Verify the server URL matches our fake server
+	if ctx.Server != server.URL {
+		t.Errorf("Server = %q, want %q", ctx.Server, server.URL)
+	}
+}
+
+// TestNewK8sContextFromInClusterConfigTokenRotation tests that in-cluster context IDs
 // produce stable IDs when service-account tokens rotate using DeploymentType for provenance.
 // This test simulates the persistence/reload cycle to ensure IDs remain stable.
-// Note: The real constructor NewK8sContextFromInClusterConfig requires a reachable
-// Kubernetes cluster (it performs PingTest, GenerateKubeHandler, AssignVersion, and
-// queries kube-system namespace). Testing the full constructor path would require
-// mocking the Kubernetes client, which is beyond the scope of this change.
-// This test verifies the ID generation logic using the same DeploymentType approach
-// that the constructor now uses.
 func TestNewK8sContextFromInClusterConfigTokenRotation(t *testing.T) {
 	instanceID := core.Uuid(uuid.Must(uuid.NewV4()))
 
@@ -834,6 +1003,97 @@ func TestUpdateMesheryK8sContext(t *testing.T) {
 	// Verify created_at is preserved
 	if updatedCtx.CreatedAt == nil {
 		t.Errorf("created_at is nil after update, want preserved")
+	}
+}
+
+// TestSaveK8sContextRepeatSaveWithID verifies that calling SaveK8sContext
+// twice with the same context (repeat save) correctly handles the case where
+// SaveMesheryK8sContext returns ErrContextAlreadyPersisted and the update
+// path must use the correct context ID. This tests the fix for the CodeRabbit
+// functional correctness comment.
+func TestSaveK8sContextRepeatSaveWithID(t *testing.T) {
+	provider := newK8sContextFixture(t)
+	instanceID := core.Uuid(uuid.Must(uuid.NewV4()))
+
+	// Create initial context
+	initialCtx := K8sContext{
+		Name:              "test-context",
+		Auth:              sql.Map{"user": map[string]interface{}{"token": "token-v1"}},
+		Cluster:           sql.Map{"server": "https://10.0.0.1:443"},
+		Server:            "https://10.0.0.1:443",
+		MesheryInstanceID: &instanceID,
+		DeploymentType:    "in_cluster",
+		Version:           "v1.0.0",
+	}
+
+	// First save - should succeed
+	conn1, err := provider.SaveK8sContext("test-token", initialCtx, nil)
+	if err != nil {
+		t.Fatalf("first SaveK8sContext() error = %v", err)
+	}
+
+	// Verify connection was created
+	if conn1.ID == uuid.Nil {
+		t.Fatal("first SaveK8sContext() returned empty connection ID")
+	}
+
+	// Load the context to get its ID
+	mkcp := provider.MesheryK8sContextPersister
+	var loadedCtx K8sContext
+	err = mkcp.DB.Model(&K8sContext{}).Where("connection_id = ?", conn1.ID.String()).First(&loadedCtx).Error
+	if err != nil {
+		t.Fatalf("failed to load context after first save: %v", err)
+	}
+
+	// Create a second context with the same logical identity (same server, name, instance)
+	// but with updated auth/version - this simulates a repeat save
+	repeatCtx := K8sContext{
+		ID:                loadedCtx.ID, // Use the same ID from first save
+		Name:              "test-context",
+		Auth:              sql.Map{"user": map[string]interface{}{"token": "token-v2"}},
+		Cluster:           sql.Map{"server": "https://10.0.0.1:443"},
+		Server:            "https://10.0.0.1:443",
+		MesheryInstanceID: &instanceID,
+		DeploymentType:    "in_cluster",
+		Version:           "v1.0.1",
+	}
+
+	// Second save - should trigger ErrContextAlreadyPersisted path and update correctly
+	conn2, err := provider.SaveK8sContext("test-token", repeatCtx, nil)
+	if err != nil {
+		t.Fatalf("second SaveK8sContext() error = %v", err)
+	}
+
+	// Verify connection ID remains the same
+	if conn1.ID != conn2.ID {
+		t.Errorf("connection ID changed on repeat save: got %v, want %v", conn2.ID, conn1.ID)
+	}
+
+	// Reload context to verify it was updated
+	err = mkcp.DB.Model(&K8sContext{}).Where("connection_id = ?", conn2.ID.String()).First(&loadedCtx).Error
+	if err != nil {
+		t.Fatalf("failed to load context after second save: %v", err)
+	}
+
+	// Verify token was updated
+	token, ok := loadedCtx.Auth["user"].(map[string]interface{})["token"].(string)
+	if !ok || token != "token-v2" {
+		t.Errorf("token not updated on repeat save: got %v, want token-v2", loadedCtx.Auth)
+	}
+
+	// Verify version was updated
+	if loadedCtx.Version != "v1.0.1" {
+		t.Errorf("version not updated on repeat save: got %v, want v1.0.1", loadedCtx.Version)
+	}
+
+	// Verify there is still only one connection
+	var connectionCount int64
+	err = provider.GetGenericPersister().Model(&connections.Connection{}).Count(&connectionCount).Error
+	if err != nil {
+		t.Fatalf("failed to count connections: %v", err)
+	}
+	if connectionCount != 1 {
+		t.Errorf("expected 1 connection after repeat save, found %d", connectionCount)
 	}
 }
 
