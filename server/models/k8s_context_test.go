@@ -466,11 +466,15 @@ func TestNewK8sContextFromInClusterConfig(t *testing.T) {
 		case "/version":
 			// AssignVersion endpoint
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"major":"1","minor":"28","gitVersion":"v1.28.0"}`)
+			if _, err := fmt.Fprintf(w, `{"major":"1","minor":"28","gitVersion":"v1.28.0"}`); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		case "/api/v1/namespaces/kube-system":
 			// KubernetesServerID lookup endpoint
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"metadata":{"uid":"test-server-uid-12345"}}`)
+			if _, err := fmt.Fprintf(w, `{"metadata":{"uid":"test-server-uid-12345"}}`); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -496,29 +500,44 @@ func TestNewK8sContextFromInClusterConfig(t *testing.T) {
 	// Set in-cluster environment variables
 	oldHost := os.Getenv("KUBERNETES_SERVICE_HOST")
 	oldPort := os.Getenv("KUBERNETES_SERVICE_PORT")
-	defer func() {
+	t.Cleanup(func() {
 		if oldHost != "" {
-			os.Setenv("KUBERNETES_SERVICE_HOST", oldHost)
+			if err := os.Setenv("KUBERNETES_SERVICE_HOST", oldHost); err != nil {
+				t.Logf("failed to restore KUBERNETES_SERVICE_HOST: %v", err)
+			}
 		} else {
-			os.Unsetenv("KUBERNETES_SERVICE_HOST")
+			if err := os.Unsetenv("KUBERNETES_SERVICE_HOST"); err != nil {
+				t.Logf("failed to unset KUBERNETES_SERVICE_HOST: %v", err)
+			}
 		}
 		if oldPort != "" {
-			os.Setenv("KUBERNETES_SERVICE_PORT", oldPort)
+			if err := os.Setenv("KUBERNETES_SERVICE_PORT", oldPort); err != nil {
+				t.Logf("failed to restore KUBERNETES_SERVICE_PORT: %v", err)
+			}
 		} else {
-			os.Unsetenv("KUBERNETES_SERVICE_PORT")
+			if err := os.Unsetenv("KUBERNETES_SERVICE_PORT"); err != nil {
+				t.Logf("failed to unset KUBERNETES_SERVICE_PORT: %v", err)
+			}
 		}
-	}()
+	})
 
 	// Parse server URL to get host and port
 	u, err := url.Parse(server.URL)
 	if err != nil {
 		t.Fatalf("failed to parse server URL: %v", err)
 	}
-	os.Setenv("KUBERNETES_SERVICE_HOST", u.Hostname())
-	os.Setenv("KUBERNETES_SERVICE_PORT", u.Port())
+	if err := os.Setenv("KUBERNETES_SERVICE_HOST", u.Hostname()); err != nil {
+		t.Fatalf("failed to set KUBERNETES_SERVICE_HOST: %v", err)
+	}
+	if err := os.Setenv("KUBERNETES_SERVICE_PORT", u.Port()); err != nil {
+		t.Fatalf("failed to set KUBERNETES_SERVICE_PORT: %v", err)
+	}
 
 	// Call the actual constructor
-	log, _ := logger.New("test", logger.Options{})
+	log, err := logger.New("test", logger.Options{})
+	if err != nil {
+		t.Fatalf("failed to create logger: %v", err)
+	}
 	instanceID := core.Uuid(uuid.Must(uuid.NewV4()))
 	ctx, err := NewK8sContextFromInClusterConfig("in-cluster", &instanceID, log)
 	if err != nil {
