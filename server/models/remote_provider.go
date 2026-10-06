@@ -1200,27 +1200,26 @@ func (l *RemoteProvider) SaveK8sContext(token string, k8sContext K8sContext, add
 	// update its credential with the newly discovered auth/cluster data.
 	// This handles token rotation for in-cluster contexts where the ID remains stable.
 	if connection.CredentialID != nil && conn.CredentialSecret != nil {
-		// Update the existing credential with the new auth/cluster data
-		// First, fetch the existing credential to preserve its required fields
-		existingCred, _, credErr := l.GetCredentialByID(token, *connection.CredentialID)
-		if credErr != nil {
-			// Log the refresh failure but continue with the save to preserve previous behavior
-			l.Log.Warn(fmt.Errorf("failed to fetch credential for refresh (continuing with save): %w", credErr))
+		if !l.Capabilities.IsSupported(PersistCredentials) {
+			l.Log.Debug("PersistCredentials not supported by provider, skipping credential refresh")
 		} else {
-			// Preserve the existing credential's properties and update only the secret
-			updatedCredential := &Credential{
-				ID:     *connection.CredentialID,
-				Secret: conn.CredentialSecret,
-				UserId: existingCred.UserId, // Preserve the UserId for the update constraint
-				Name:   existingCred.Name,   // Preserve other fields
-				Type:   existingCred.Type,
-			}
-			// Use DoRequest directly with the token to update the credential via the remote provider
-			// This avoids the nil-request panic that would occur in UpdateUserCredential -> GetToken -> req.Cookie()
-			if !l.Capabilities.IsSupported(PersistCredentials) {
-				// Log the capability limitation but continue with the save to preserve previous behavior
-				l.Log.Warn(fmt.Errorf("PersistCredentials not supported by provider, skipping credential refresh"))
+			// Update the existing credential with the new auth/cluster data
+			// First, fetch the existing credential to preserve its required fields
+			existingCred, _, credErr := l.GetCredentialByID(token, *connection.CredentialID)
+			if credErr != nil {
+				// Log the refresh failure but continue with the save to preserve previous behavior
+				l.Log.Warn(fmt.Errorf("failed to fetch credential for refresh (continuing with save): %w", credErr))
 			} else {
+				// Preserve the existing credential's properties and update only the secret
+				updatedCredential := &Credential{
+					ID:     *connection.CredentialID,
+					Secret: conn.CredentialSecret,
+					UserId: existingCred.UserId, // Preserve the UserId for the update constraint
+					Name:   existingCred.Name,   // Preserve other fields
+					Type:   existingCred.Type,
+				}
+				// Use DoRequest directly with the token to update the credential via the remote provider
+				// This avoids the nil-request panic that would occur in UpdateUserCredential -> GetToken -> req.Cookie()
 				ep, _ := l.Capabilities.GetEndpointForFeature(PersistCredentials)
 				_creds, err := json.Marshal(updatedCredential)
 				if err != nil {
